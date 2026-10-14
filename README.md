@@ -2,6 +2,8 @@
 
 A desk phone becomes the line between you and your Claude Code sessions.
 
+**Came from Instagram?** [Watch it in action](https://www.instagram.com/reel/DeeAviVMdPa/), then follow the setup below to build your own.
+
 > **Mac only (Apple Silicon, M1 or later).** It relies on macOS throughout: iTerm2 scripting to type into
 > sessions, the `say` voices, the keychain and launchd. There are no Windows, Linux or Intel Mac instructions.
 
@@ -163,6 +165,10 @@ tail -f ~/.claude-phone/logs/phone.log   # calls, transcripts, every injection
 - **`call_<name>` always goes to voicemail:** `phone status` → `desk_online`. Asterisk qualifies the phone every 10 s, so a phone that was just plugged in can take that long to count as online.
 - **Text not typed:** the tab must be in `phone list`. iTerm2 needs Automation permission for whatever runs the daemon (System Settings → Privacy & Security → Automation).
 - **Wrong words for repo names:** whisper is prompted with live repo and branch names; check `phone list` spelling.
+
+## Credits
+
+Built by [@risingpower](https://www.instagram.com/risingpower/) with Claude Code.
 
 ## License
 

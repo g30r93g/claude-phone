@@ -99,6 +99,26 @@ and put your API key in the keychain (`security add-generic-password -s claude-p
 that call falls back to the Mac voice rather than going silent. Each repo can have its own voice (`repo_voices`
 in [config.example.toml](config.example.toml)).
 
+### Meetings and the screen (optional)
+
+With `screen_push = true`, every call and announcement also leaves a short summary on the phone's screen
+(sessions write it in the tools' `screen` field). With `meeting_alerts = true`, two minutes before each meeting
+in the Mac's Calendar app (any synced account: Google, iCloud, Exchange) the phone answers itself on the
+speaker and whispers "Pssst, you have a meeting", without ringing, then shows the time, title, who it's with
+and when it ends. From then until the meeting ends, Claude's calls are held: questions go to voicemail,
+announcements go to the screen only, and nothing is pushed to your mobile.
+
+- **Phone:** the screen needs the T31P to trust the Mac ([docs/t31p-setup.md](docs/t31p-setup.md) step 11).
+- **Mac:** the first time, allow calendar access and local network access for Python when macOS asks
+  (System Settings → Privacy & Security → Calendars / Local Network).
+- **DND key:** the Mac switches the phone's DND on at each alert and off when the meeting ends. Switch it off
+  yourself to end the hold early; switch it on any time to hold Claude's calls (step 12 of the phone guide).
+- `phone meetings` lists your calendars and the meetings it will use; `meeting_calendars = ["Work"]` limits it.
+- `phone meeting-test` plays a made-up alert so you can hear and see it. Calls are not held.
+- The whisper is the Mac's Whisper voice by default. Jessica whispering (ElevenLabs v3):
+  `whisper_provider = "elevenlabs_v3"`, `whisper_voice = "r1KmysJdVYZjJCm4mL3b"`,
+  `whisper_text = "[whispers] Pssst... you have a meeting."`
+
 ### Missed-call pushes (ntfy)
 
 Install the free ntfy app, run `phone push` in a terminal and subscribe to the topic it prints (treat it as a password), then `phone push test`. A `call_<name>` that goes to voicemail, or a `notify_<name>` that isn't heard, then pushes to the app. Pushes pass through the public ntfy.sh server; set `push_text = false` in config.toml to send only who called.

@@ -22,3 +22,12 @@ operator_voice = "Shelley (English (UK))"
 # Per-repo ringtones (T31P Ring1-8). Unlisted repos get the least-used ring on first sight.
 # [repo_ringtones]
 # lemon-stand = 3
+
+# Call summaries on the phone's screen (docs/t31p-setup.md step 11)
+# screen_push = true
+# Meeting alerts from the Mac's Calendar app: whisper + screen 2 minutes before, calls held until it ends
+# meeting_alerts = true
+# meeting_warn_minutes = 2
+# meeting_calendars = ["Work"]   # default: every calendar (`phone meetings` lists them)
+# whisper_provider = "say"       # or "elevenlabs_v3" with whisper_text = "[whispers] Pssst... you have a meeting."
+# whisper_voice = "Whisper"

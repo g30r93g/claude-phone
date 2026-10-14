@@ -92,3 +92,28 @@ Both URLs are on the LAN only (daemon refuses anything outside `lan_cidr`).
 
 Each repo gets its own ringtone (1-8), sent as `Alert-Info: <http://127.0.0.1>;info=RingN`. The T31P plays it with no setup.
 `phone list` shows each repo's ring. To pin one: `[repo_ringtones]` in `~/.claude-phone/config.toml`, e.g. `lemon-stand = 3`.
+
+## 11. Screen messages (optional, for `screen_push`)
+
+1. On the Mac, open **https://\<phone-ip\>** in a browser. It warns that the connection is not private
+   (the phone's own certificate): click **Advanced**, then **Proceed**.
+2. Log in as `admin` with the password you set in step 3.
+3. **Features** tab → **Remote Control** (left menu).
+4. **Push XML Server IP Address**: `<mac-ip>`. Confirm.
+
+`phone meeting-test` checks it: the phone whispers and then shows a test meeting.
+
+## 12. DND key (optional, with `meeting_alerts`)
+
+So the phone's DND key and the meeting hold stay in step: the Mac switches DND on at each meeting alert and
+off when the meeting ends; switching DND off yourself ends the hold early (meeting finished early); switching
+it on outside a meeting holds Claude's calls too.
+
+1. **Features → Remote Control → Action URI Allow IP List**: `<mac-ip>`. Confirm.
+2. **Features → Action URL**: Open DND `http://<mac-ip>:8766/dnd/on`, Close DND `http://<mac-ip>:8766/dnd/off`. Confirm.
+3. On the Mac, store the phone's admin password: `security add-generic-password -U -s claude-phone -a desk-admin -w`,
+   then type the password at the prompt (not the command). Without it, only step 2 works: the DND key still
+   controls the hold, but the phone won't show DND during meetings.
+
+After a wrong password the phone locks its web login for a few minutes; the daemon stops trying after
+one refusal until it restarts.

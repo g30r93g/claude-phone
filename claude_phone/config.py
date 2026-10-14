@@ -53,6 +53,19 @@ class Settings:
     callerid_max: int = 17  # T31P shows 17 chars before scrolling (tested 2026-10-09)
     tts_provider: str = "say"
     say_voice: str = "Daniel"
+    # Yealink Push XML: summaries of calls and meetings on the desk phone's screen. The phone must list lan_ip
+    # as its Push XML Server. desk_ip: empty means the address the phone registered from.
+    screen_push: bool = False
+    desk_ip: str = ""
+    # Meetings from the Mac's Calendar app: a whisper and a screen warn_minutes before each one, and Claude's
+    # calls are held (voicemail, no pushes) from then until it ends. Empty meeting_calendars: every calendar.
+    meeting_alerts: bool = False
+    meeting_warn_minutes: int = 2
+    meeting_calendars: list = field(default_factory=list)
+    # The meeting whisper, played on the speaker without ringing. "elevenlabs_v3" acts out tags like "[whispers]".
+    whisper_provider: str = "say"
+    whisper_voice: str = "Whisper"
+    whisper_text: str = "Pssst. You have a meeting."
     elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
     elevenlabs_model: str = "eleven_turbo_v2_5"
     # repo name -> {"provider": ..., "voice": ...}

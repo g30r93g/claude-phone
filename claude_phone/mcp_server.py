@@ -31,7 +31,8 @@ async def _post(path: str, body: dict) -> dict:
             return await r.json()
 
 
-async def call_owner(question: str, context: str | None = None, from_agent: str | None = None) -> str:
+async def call_owner(question: str, context: str | None = None, screen: str | None = None,
+                     from_agent: str | None = None) -> str:
     """Ring {owner}'s desk phone, ask one question out loud, and return the spoken answer as text.
 
     Use only when you are blocked on a decision that is genuinely {owner}'s to make. For news that
@@ -46,10 +47,11 @@ async def call_owner(question: str, context: str | None = None, from_agent: str 
     Args:
         question: The single question, written to be spoken aloud. One sentence, about 20 words or fewer.
         context: Optional background, only if the question makes no sense without it. About 10 words.
+        screen: The question summarised for the desk phone's small screen, about 8 words.
         from_agent: If you are a subagent, a short name for yourself (e.g. "reviewer").
     """
     try:
-        res = await _post("/call", _body(question=question, context=context, from_agent=from_agent))
+        res = await _post("/call", _body(question=question, context=context, screen=screen, from_agent=from_agent))
     except Exception as e:
         return f"The phone system is unavailable ({e.__class__.__name__}). Carry on with your best assumption."
     if res.get("status") == "answered":
@@ -59,7 +61,7 @@ async def call_owner(question: str, context: str | None = None, from_agent: str 
     return res.get("message", "The call failed.")
 
 
-async def notify_owner(message: str, from_agent: str | None = None) -> str:
+async def notify_owner(message: str, screen: str | None = None, from_agent: str | None = None) -> str:
     """Ring {owner}'s desk phone and read a short announcement, then hang up. No reply is expected.
 
     Use for news {owner} would want to hear now without being asked anything: a long job finished,
@@ -69,14 +71,18 @@ async def notify_owner(message: str, from_agent: str | None = None) -> str:
     Args:
         message: What {owner} needs to know, written to be spoken. One or two short sentences, about 25
             words or fewer. Never read out code, paths, URLs or PR numbers.
+        screen: The message summarised for the desk phone's small screen, about 8 words.
         from_agent: If you are a subagent, a short name for yourself (e.g. "reviewer").
     """
     try:
-        res = await _post("/notify", _body(message=message, from_agent=from_agent))
+        res = await _post("/notify", _body(message=message, screen=screen, from_agent=from_agent))
     except Exception as e:
         return f"The phone system is unavailable ({e.__class__.__name__}). The notification was not delivered."
     if res.get("status") == "delivered":
         return f"{S.owner} heard the notification." + (f" ({res['note']}.)" if res.get("note") else "")
+    if res.get("status") == "on_screen":
+        return (f"{S.owner} isn't taking calls right now ({res['reason']}), so the announcement was shown on the "
+                "desk phone's screen without ringing.")
     if res.get("status") == "not_delivered":
         return (f"{S.owner} didn't pick up, so the notification was not delivered (reason: {res['reason']}). "
                 "No voicemail was left.")

@@ -7,12 +7,13 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timedelta
 from ipaddress import ip_address, ip_network
 from pathlib import Path
 
 from aiohttp import web
 
-from . import config, hold, housekeeping, inject, keychain, log, push, registry, stt, tts
+from . import config, diary, hold, housekeeping, inject, keychain, log, push, registry, screen, stt, tts
 from .ari import ARI, Call, Hangup
 
 lg = log.get("daemon")
@@ -27,8 +28,10 @@ SPINNER = re.compile(r"…\s*\(\d+[hms]|esc to interrupt")
 HOLD_MAX = 600  # seconds on hold before the message is taken anyway
 # Hangup causes that mean "didn't pick up": no answer, busy, DND (480/486/603), unreachable.
 NOT_ANSWERED = "not answered"
-# Missed-call reasons where the owner was at the phone, so a push would only repeat what they know.
-PUSH_SKIP = {"hung up before answering", "answered but nothing was said"}
+# Missed-call reasons where a push would only repeat what the owner knows, or disturb a meeting.
+IN_MEETING = "in a meeting"
+DND = "do not disturb"
+PUSH_SKIP = {"hung up before answering", "answered but nothing was said", IN_MEETING, DND}
 
 
 def recording_path(name: str) -> Path:
@@ -89,6 +92,11 @@ class Controller:
         self.line = asyncio.Lock()  # one call with the owner at a time
         self.calls: dict[str, asyncio.Task] = {}
         self.endpoint_state: dict[str, str] = {}
+        self.meeting: diary.Meeting | None = None  # the meeting in (or about to start) that holds calls
+        self.window: set[str] = set()  # keys of the meetings in the current window
+        self.released: set[str] = set()  # meetings whose hold was ended early with the DND key
+        self.phone_dnd = False  # the phone's DND key, as reported by its Action URLs
+        self.dnd_ours = False  # we switched the phone's DND on for a meeting, so we switch it off after
 
     # --- lifecycle ---
 
@@ -101,6 +109,69 @@ class Controller:
         asyncio.create_task(self.sweeper())
         await asyncio.wait_for(self.ari.connected.wait(), 30)
         await self.update_mwi()
+        if self.s.meeting_alerts:
+            asyncio.create_task(self.meeting_watch())
+
+    async def meeting_watch(self) -> None:
+        """Every 15 s: whisper and show each meeting warn_minutes before it starts, and hold Claude's calls
+        from then until it ends. No whisper while another meeting is under way."""
+        if not await asyncio.to_thread(diary.access):
+            lg.warning("meeting alerts off: no calendar access (System Settings → Privacy & Security → Calendars)")
+            return
+        found = await asyncio.to_thread(diary.calendars)
+        lg.info("meeting alerts on: %s", ", ".join(c for c in found if not self.s.meeting_calendars
+                                                   or c in self.s.meeting_calendars) or "no matching calendars")
+        alerted: set[str] = set()
+        while True:
+            try:
+                await self.check_meetings(datetime.now().astimezone(), alerted)
+            except Exception as e:
+                lg.exception("meeting check failed: %r", e)
+            await asyncio.sleep(15)
+
+    async def check_meetings(self, now: datetime, alerted: set[str]) -> None:
+        warn = timedelta(minutes=self.s.meeting_warn_minutes)
+        ms = await asyncio.to_thread(diary.window, now, warn, self.s.meeting_calendars or None)
+        held = max(ms, key=lambda m: m.end) if ms else None
+        if bool(held) != bool(self.meeting):
+            lg.info("meeting window %s", f"until {held.end:%H:%M} ({held.title})" if held else "over")
+        self.meeting, self.window = held, {m.key for m in ms}
+        if not held and self.dnd_ours:
+            self.dnd_ours = False
+            if self.phone_dnd:
+                await screen.press("DNDOff")
+        for m in ms:
+            if m.key in alerted:
+                continue
+            alerted.add(m.key)
+            if m.start < now - timedelta(minutes=1):
+                continue  # already under way when first seen (daemon restart): hold calls, no alert
+            await self.alert(m, now, whisper=not any(o.start <= now < o.end for o in ms if o is not m))
+
+    async def alert(self, m: diary.Meeting, now: datetime, whisper: bool = True, dnd: bool = True) -> None:
+        """Whisper first: the phone rejects even an intercom call once DND is on."""
+        title, text = diary.summary(m)
+        if whisper:
+            await self.whisper(self.s.whisper_text, title)
+        if dnd and not self.phone_dnd and await screen.press("DNDOn"):
+            self.dnd_ours = True
+        await screen.show(title, text, timeout=int((m.start - now).total_seconds()) + 300)
+
+    def hold_reason(self) -> str | None:
+        """Why Claude's calls are held right now, if they are: the phone's DND key, or a meeting whose
+        hold wasn't ended early by switching DND off."""
+        if self.phone_dnd:
+            return IN_MEETING if self.meeting else DND
+        if self.meeting and not self.window <= self.released:
+            return IN_MEETING
+        return None
+
+    def set_phone_dnd(self, on: bool) -> None:
+        self.phone_dnd = on
+        if not on:
+            self.dnd_ours = False
+            self.released |= self.window  # DND off during a meeting ends its hold
+        lg.info("phone DND %s; calls %s", "on" if on else "off", f"held ({self.hold_reason()})" if self.hold_reason() else "not held")
 
     async def sweeper(self) -> None:
         missing = sweeps = 0
@@ -376,17 +447,22 @@ class Controller:
             label, intro = f"{label}@{agent}", f"{intro}, {agent}"
         return {"label": label, "ext": ext, "sid": sid, "repo": repo, "intro": intro}
 
-    async def ring(self, c: dict, prefix: str) -> tuple[Call | None, str]:
-        """Ring the desk phone. Returns (answered call, '') or (None, why not). Caller holds self.line."""
+    async def ring(self, c: dict, prefix: str, auto_answer: bool = False) -> tuple[Call | None, str]:
+        """Ring the desk phone. Returns (answered call, '') or (None, why not). Caller holds self.line.
+        auto_answer: an intercom call, which the phone picks up on the speaker without ringing."""
         chan_id = f"{prefix}-{uuid.uuid4().hex[:12]}"
         answered = self.ari.wait_for(lambda e: e.get("type") == "StasisStart" and e["channel"]["id"] == chan_id)
         call = Call(self.ari, chan_id)
         cid = caller_id(c["label"], self.s.callerid_max)
-        ring = ringtone(c["repo"], self.s.repo_ringtones)
+        if auto_answer:
+            headers = {"PJSIP_HEADER(add,Alert-Info)": "<http://127.0.0.1>;info=alert-autoanswer",
+                       "PJSIP_HEADER(add,Call-Info)": "<sip:127.0.0.1>;answer-after=0"}
+        else:
+            headers = {"PJSIP_HEADER(add,Alert-Info)": f"<http://127.0.0.1>;info=Ring{ringtone(c['repo'], self.s.repo_ringtones)}"}
         await self.ari.post("/channels", channelId=chan_id, endpoint=f"PJSIP/{self.s.ring_ext}",
                             app="claude-phone", appArgs="outbound",
                             callerId=f'"{cid}" <{c["ext"] or ""}>', timeout=self.s.ring_seconds,
-                            body={"variables": {"PJSIP_HEADER(add,Alert-Info)": f"<http://127.0.0.1>;info=Ring{ring}"}})
+                            body={"variables": headers})
         done, _ = await asyncio.wait({answered, call.gone}, timeout=self.s.ring_seconds + 5,
                                      return_when=asyncio.FIRST_COMPLETED)
         if answered in done:
@@ -409,6 +485,7 @@ class Controller:
         context = self.sentence(body.get("context")) or None
         c = self.caller(body)
         label, ext, sid = c["label"], c["ext"], c["sid"]
+        body["_label"] = label
         script = f"{c['intro']}. " + (f"{context} " if context else "") + question
         lg.info("call_owner from %s ext=%s: %r", label, ext, question)
 
@@ -429,6 +506,8 @@ class Controller:
             return {"status": "error", "message": "question is required"}
         if body.get("_force_voicemail"):
             return await to_voicemail(body["_force_voicemail"])
+        if held := self.hold_reason():
+            return await to_voicemail(held)
         if self.line.locked():
             return await to_voicemail("line busy")
         if not await self.desk_online():
@@ -462,6 +541,7 @@ class Controller:
         if not message:
             return {"status": "error", "message": "message is required"}
         c = self.caller(body)
+        body["_label"] = c["label"]
         lg.info("notify_owner from %s ext=%s: %r", c["label"], c["ext"], message)
         speech = asyncio.create_task(tts.render_async(f"{c['intro']}. {message}", c["repo"]))
 
@@ -471,6 +551,10 @@ class Controller:
             push.missed("Announcement", c["label"], message, reason)
             return {"status": "not_delivered", "reason": reason}
 
+        if held := self.hold_reason():
+            speech.cancel()
+            lg.info("notification from %s held: %s", c["label"], held)
+            return {"status": "on_screen" if self.s.screen_push else "not_delivered", "reason": held}
         if self.line.locked():
             return missed("line busy")
         if not await self.desk_online():
@@ -488,6 +572,31 @@ class Controller:
             finally:
                 call.close()
             return {"status": "delivered"}
+
+    async def whisper(self, text: str, label: str) -> str:
+        """Say `text` on the phone's speaker without ringing: an auto-answered intercom call. `label` shows
+        as the caller ID. Returns 'delivered' or why not."""
+        speech = asyncio.create_task(tts.render_async(text, voice=(self.s.whisper_provider, self.s.whisper_voice)))
+        if self.line.locked():
+            speech.cancel()
+            return "line busy"
+        if not await self.desk_online():
+            speech.cancel()
+            return "desk phone offline"
+        async with self.line:
+            call, why = await self.ring({"label": label, "repo": None, "ext": ""}, "wh", auto_answer=True)
+            if not call:
+                speech.cancel()
+                return why
+            try:
+                await call.play(await speech)
+                await call.hangup()
+            except Hangup:
+                pass
+            finally:
+                call.close()
+        lg.info("whispered %r (%s)", text, label)
+        return "delivered"
 
     async def transfer(self, body: dict) -> dict:
         """A session hands the owner to another session: ring, explain, then connect them to the target,
@@ -512,6 +621,8 @@ class Controller:
             lg.info("transfer from %s not connected (%s)", c["label"], why)
             return {"status": "not_connected", "reason": why}
 
+        if held := self.hold_reason():
+            return missed(held)
         if self.line.locked():
             return missed("line busy")
         if not await self.desk_online():
@@ -606,10 +717,23 @@ class Controller:
             lg.exception("transfer failed: %r", e)
             return web.json_response({"status": "not_connected", "reason": f"error: {e.__class__.__name__}"})
 
+    async def show_on_screen(self, body: dict, said: str, res: dict) -> None:
+        """A call or announcement as a summary on the phone's screen, once the line is free."""
+        if not self.s.screen_push or not body.get("_label") or res.get("status") == "error":
+            return
+        text = " ".join((body.get("screen") or said or "").split())
+        if len(text) > 80:
+            text = text[:77] + "..."
+        if res.get("status") == "voicemail":
+            text += "\n(voicemail waiting)"
+        await screen.show(body["_label"], text, timeout=600)
+
     async def http_notify(self, request: web.Request) -> web.Response:
         body = await request.json()
         try:
-            return web.json_response(await self.notify_owner(body))
+            res = await self.notify_owner(body)
+            asyncio.create_task(self.show_on_screen(body, body.get("message"), res))
+            return web.json_response(res)
         except Exception as e:
             lg.exception("notify_owner failed: %r", e)
             return web.json_response({"status": "not_delivered", "reason": f"error: {e.__class__.__name__}"})
@@ -617,7 +741,9 @@ class Controller:
     async def http_call(self, request: web.Request) -> web.Response:
         body = await request.json()
         try:
-            return web.json_response(await self.call_owner(body))
+            res = await self.call_owner(body)
+            asyncio.create_task(self.show_on_screen(body, body.get("question"), res))
+            return web.json_response(res)
         except Exception as e:
             # Never lose the question: whatever broke, it becomes a voicemail.
             lg.exception("call_owner failed: %r", e)
@@ -635,6 +761,25 @@ class Controller:
         render = browser_xml if request.path == "/sessions.xml" else phonebook_xml
         return web.Response(text=render(registry.all_sessions(), self.s), content_type="text/xml")
 
+    async def http_whisper(self, request: web.Request) -> web.Response:
+        body = await request.json()
+        return web.json_response({"status": await self.whisper(body["text"], body.get("label") or "Psst")})
+
+    async def http_dnd(self, request: web.Request) -> web.Response:
+        """The phone's Action URLs: Open DND -> /dnd/on, Close DND -> /dnd/off."""
+        if ip_address(request.remote or "0.0.0.0") not in ip_network(self.s.lan_cidr):
+            raise web.HTTPForbidden()
+        self.set_phone_dnd(request.match_info["state"] == "on")
+        return web.Response(text="ok")
+
+    async def http_meeting_test(self, request: web.Request) -> web.Response:
+        """`phone meeting-test`: the alert for a made-up meeting. Calls are not held."""
+        now = datetime.now().astimezone()
+        start = now + timedelta(minutes=self.s.meeting_warn_minutes)
+        await self.alert(diary.Meeting("test", "Test meeting", start, start + timedelta(minutes=30),
+                                       ("Sarah Jones", "Dan Smith")), now, dnd=False)
+        return web.json_response({"ok": True})
+
     async def http_health(self, request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "ip_warning": config.ip_warning(), "ari": self.ari.connected.is_set(),
                                   "desk_online": await self.desk_online(), "line_busy": self.line.locked()})
@@ -648,6 +793,8 @@ async def main() -> None:
     app.router.add_post("/call", c.http_call)
     app.router.add_post("/notify", c.http_notify)
     app.router.add_post("/transfer", c.http_transfer)
+    app.router.add_post("/whisper", c.http_whisper)
+    app.router.add_post("/meeting-test", c.http_meeting_test)
     app.router.add_get("/health", c.http_health)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -655,6 +802,7 @@ async def main() -> None:
     book = web.Application()
     book.router.add_get("/phonebook.xml", c.http_sessions)
     book.router.add_get("/sessions.xml", c.http_sessions)
+    book.router.add_get("/dnd/{state:on|off}", c.http_dnd)
     book_runner = web.AppRunner(book)
     await book_runner.setup()
     lg.info("daemon up on 127.0.0.1:%s, ringing PJSIP/%s", c.s.daemon_port, c.s.ring_ext)

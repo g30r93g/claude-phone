@@ -38,6 +38,11 @@ def ctl(monkeypatch):
     c = daemon.Controller.__new__(daemon.Controller)
     c.s = daemon.config.load()
     c.line = asyncio.Lock()
+    c.meeting, c.window, c.released, c.phone_dnd, c.dnd_ours = None, set(), set(), False, False
+
+    async def no_key(key):
+        return False
+    monkeypatch.setattr(daemon.screen, "press", no_key)
     c.typed, c.heard, c.pushed = [], [], []
 
     async def render_async(text, repo=None, voice=None):
@@ -145,3 +150,92 @@ def test_voicemail_message_names_the_owner(ctl):
     registry.register("s", "repo", "main", None, "/r", "tab")
     res = run(ctl.call_owner({"question": "Merge it", "session_id": "s", "_force_voicemail": "line busy"}))
     assert res["message"].startswith("Sam didn't answer.")
+
+
+def meeting(start_min, length_min=30, title="Board review", people=("Sarah Jones", "Dan Smith")):
+    from datetime import datetime, timedelta
+    from claude_phone import diary
+    now = datetime(2026, 10, 14, 14, 58).astimezone()
+    start = now + timedelta(minutes=start_min)
+    return now, diary.Meeting(f"e1@{start}", title, start, start + timedelta(minutes=length_min), people)
+
+
+def test_meeting_whispers_once_shows_screen_and_holds_calls(ctl, monkeypatch):
+    from claude_phone import diary, screen
+    now, m = meeting(2)
+    monkeypatch.setattr(diary, "window", lambda *a: [m])
+    shown, whispered = [], []
+
+    async def show(title, text, timeout=120):
+        shown.append((title, text))
+
+    async def whisper(text, label):
+        whispered.append(label)
+    monkeypatch.setattr(screen, "show", show)
+    monkeypatch.setattr(ctl, "whisper", whisper)
+    alerted = set()
+    run(ctl.check_meetings(now, alerted))
+    run(ctl.check_meetings(now, alerted))
+    assert whispered == [f"{m.start:%H:%M} Board review"]
+    assert shown == [(f"{m.start:%H:%M} Board review", f"with Sarah, Dan\nDND until {m.end:%H:%M}")]
+    assert ctl.meeting == m
+
+    registry.register("s", "repo", "main", None, "/r", "tab")
+    res = run(ctl.call_owner({"question": "Merge it", "session_id": "s"}))
+    assert res["reason"] == "in a meeting" and ctl.pushed == []
+    ctl.s.screen_push = True
+    assert run(ctl.notify_owner({"message": "Build done", "session_id": "s"}))["status"] == "on_screen"
+
+
+def test_meeting_already_under_way_holds_calls_without_alert(ctl, monkeypatch):
+    from claude_phone import diary
+    now, m = meeting(-10)
+    monkeypatch.setattr(diary, "window", lambda *a: [m])
+
+    async def boom(*a, **k):
+        raise AssertionError("no alert expected")
+    monkeypatch.setattr(ctl, "whisper", boom)
+    run(ctl.check_meetings(now, set()))
+    assert ctl.meeting == m
+
+
+def test_meeting_summary_trims_people():
+    from claude_phone import diary
+    _, m = meeting(2, people=("Ann Lee", "bob@x.com", "Cy Ng", "Di Fox"))
+    assert diary.summary(m)[1].startswith("with Ann, bob +2\n")
+
+
+def test_call_summary_on_screen_prefers_the_sessions_summary(ctl, monkeypatch):
+    from claude_phone import screen
+    shown = []
+
+    async def show(title, text, timeout=120):
+        shown.append((title, text))
+    monkeypatch.setattr(screen, "show", show)
+    ctl.s.screen_push = True
+    body = {"_label": "repo/main", "screen": "Merge the payments PR?"}
+    run(ctl.show_on_screen(body, "Shall I merge the payments pull request now?", {"status": "voicemail"}))
+    run(ctl.show_on_screen({"_label": "repo/main"}, "x" * 100, {"status": "delivered"}))
+    assert shown == [("repo/main", "Merge the payments PR?\n(voicemail waiting)"), ("repo/main", "x" * 77 + "...")]
+
+
+def test_dnd_key_off_ends_a_meeting_hold_and_on_holds_calls(ctl, monkeypatch):
+    from claude_phone import diary, screen
+    now, m = meeting(2)
+    monkeypatch.setattr(diary, "window", lambda *a: [m])
+
+    async def nothing(*a, **k):
+        return None
+    monkeypatch.setattr(screen, "show", nothing)
+    monkeypatch.setattr(ctl, "whisper", nothing)
+    run(ctl.check_meetings(now, set()))
+    assert ctl.hold_reason() == "in a meeting"
+    ctl.set_phone_dnd(False)  # DND key off: the meeting finished early
+    assert ctl.hold_reason() is None
+    ctl.set_phone_dnd(True)
+    assert ctl.hold_reason() == "in a meeting"
+    monkeypatch.setattr(diary, "window", lambda *a: [])
+    run(ctl.check_meetings(now, set()))
+    assert ctl.hold_reason() == "do not disturb"
+    ctl.set_phone_dnd(False)
+    assert ctl.hold_reason() is None

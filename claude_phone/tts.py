@@ -39,6 +39,7 @@ class Say(Provider):
 
 class ElevenLabs(Provider):
     name = "elevenlabs"
+    model: str | None = None  # None: elevenlabs_model from config
 
     def render(self, text: str, voice: str | None, out_wav: Path) -> None:
         key = keychain.elevenlabs_key()
@@ -48,12 +49,18 @@ class ElevenLabs(Provider):
         voice = voice or s.elevenlabs_voice_id
         req = urllib.request.Request(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice}?output_format=pcm_16000",
-            data=json.dumps({"text": text, "model_id": s.elevenlabs_model}).encode(),
+            data=json.dumps({"text": text, "model_id": self.model or s.elevenlabs_model}).encode(),
             headers={"xi-api-key": key, "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=20) as r:
             pcm = r.read()
         _write_wav(out_wav, pcm, 16000)
+
+
+class ElevenLabsV3(ElevenLabs):
+    """Eleven v3, which acts out audio tags such as "[whispers]"."""
+    name = "elevenlabs_v3"
+    model = "eleven_v3"
 
 
 def _write_wav(path: Path, pcm: bytes, rate: int) -> None:
@@ -65,7 +72,7 @@ def _write_wav(path: Path, pcm: bytes, rate: int) -> None:
         w.writeframes(pcm)
 
 
-PROVIDERS: dict[str, Provider] = {p.name: p for p in (Say(), ElevenLabs())}
+PROVIDERS: dict[str, Provider] = {p.name: p for p in (Say(), ElevenLabs(), ElevenLabsV3())}
 
 
 def voice_for(repo: str | None) -> tuple[str, str | None]:

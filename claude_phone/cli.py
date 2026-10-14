@@ -297,6 +297,27 @@ def cmd_push(a) -> None:
           "Treat it like a password. Then run: phone push test")
 
 
+def cmd_meeting_test(a) -> None:
+    req = urllib.request.Request(f"{config.load().daemon_url}/meeting-test", data=b"{}", method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        print(json.loads(r.read()))
+
+
+def cmd_meetings(a) -> None:
+    from datetime import datetime, timedelta
+    from . import diary
+    s = config.load()
+    if not diary.access():
+        print("No calendar access: System Settings → Privacy & Security → Calendars.")
+        return
+    print("calendars:", ", ".join(diary.calendars()))
+    print("used:", ", ".join(s.meeting_calendars) or "all")
+    now = datetime.now().astimezone()
+    for m in diary.meetings(now, now + timedelta(days=2), s.meeting_calendars or None):
+        title, text = diary.summary(m)
+        print(f"{m.start:%a} {title} ({text.replace(chr(10), '; ')})")
+
+
 def cmd_say(a) -> None:
     from . import tts
     print(tts.render(a.text))
@@ -332,6 +353,8 @@ def main() -> None:
     sp = sub.add_parser("say", help="render text to speech, print the media URI")
     sp.add_argument("text")
     sp.set_defaults(fn=cmd_say)
+    sub.add_parser("meeting-test", help="preview a meeting alert (whisper and screen)").set_defaults(fn=cmd_meeting_test)
+    sub.add_parser("meetings", help="upcoming meetings the alerts will use").set_defaults(fn=cmd_meetings)
     sub.add_parser("config", help="regenerate Asterisk config").set_defaults(fn=lambda a: render_asterisk_config())
     a = p.parse_args()
     a.fn(a)

@@ -2,7 +2,7 @@
 
 A desk phone becomes the line between you and your Claude Code sessions.
 
-**Came from Instagram?** [Watch it in action](https://www.instagram.com/reel/DeeAviVMdPa/), then follow the setup below to build your own.
+**Came from Instagram?** [Watch it in action](https://www.instagram.com/reel/DeY8JPmszXs/), then follow the setup below to build your own.
 
 > **Mac only (Apple Silicon, M1 or later).** It relies on macOS throughout: iTerm2 scripting to type into
 > sessions, the `say` voices, the keychain and launchd. There are no Windows, Linux or Intel Mac instructions.

@@ -2,7 +2,7 @@ import math
 import struct
 import wave
 
-from claude_phone import stt, tts
+from claude_phone import reply, stt, tts
 from claude_phone.daemon import SPINNER, browser_xml, caller_id
 from claude_phone.config import Settings
 from claude_phone.registry import Session
@@ -79,6 +79,15 @@ def test_changing_the_default_voice_renders_new_speech(monkeypatch):
     assert a != b and rendered == ["Daniel", "Fiona"]
 
 
+def test_caller_intro():
+    assert tts.caller_intro("lemon-stand", "main") == "Claude from project lemon stand"
+    assert tts.caller_intro("g30r93g", None) == "Claude here"  # not in a git repo
+    assert tts.caller_intro("g30r93g", None, "reviewer") == "Claude's reviewer here"
+    assert tts.caller_intro("lemon-stand", "feat/ags-2") == "Claude from project lemon stand working on ags 2"
+    assert tts.caller_intro("site", "spike/new-nav") == "Claude from project site working on spike new nav"
+    assert tts.caller_intro("site", "fix/a", "reviewer") == "Claude's reviewer from project site working on a"
+
+
 def test_siri_falls_back_to_say(monkeypatch):
     from claude_phone import config
 
@@ -90,3 +99,49 @@ def test_siri_falls_back_to_say(monkeypatch):
     monkeypatch.setattr(config, "load", lambda: Settings(tts_provider="siri", siri_voice="Voice 2"))
     assert tts.render("Hello there.").startswith("sound:")
     assert said == ["Hello there."]
+
+
+def test_spoken_reply_drops_code_and_markdown():
+    text = "**Done.** See [the PR](https://x.y/1).\n\n```py\nprint(1)\n```\n- tests pass"
+    assert reply.spoken(text) == f"Done. See the PR. tests pass {reply.ON_SCREEN}"
+    assert reply.spoken("All good.") == "All good."
+    assert reply.spoken("Use `call_owner`, it's _fine_.") == "Use call owner, it's fine ."
+    assert reply.spoken("```\ncode\n```") == f"Done. {reply.ON_SCREEN}"
+
+
+def test_spoken_reply_keeps_whole_sentences_under_the_limit():
+    text = " ".join(f"Sentence number {i} is here." for i in range(30))
+    out = reply.spoken(text, max_words=12)
+    assert out == f"Sentence number 0 is here. Sentence number 1 is here. {reply.ON_SCREEN}"
+
+
+def test_reply_from_transcript_is_the_text_after_the_last_tool_call(tmp_path):
+    import json
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "Fix it"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking."}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+        {"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "text", "text": "sub"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Fixed it."}]}},
+        {"type": "system"},
+    ]
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines))
+    assert reply.from_transcript(str(p)) == "Fixed it."
+
+
+def test_long_hold_tracks_are_cut_with_a_fade(tmp_path):
+    import array
+    import wave
+    from claude_phone import hold
+    wav = tmp_path / "t.wav"
+    tts._write_wav(wav, array.array("h", [10000] * 16000 * 10).tobytes(), 16000)  # 10 s
+    hold._cap(wav, 5)
+    with wave.open(str(wav)) as r:
+        n, samples = r.getnframes(), array.array("h", r.readframes(r.getnframes()))
+    assert n == 16000 * 5
+    assert samples[0] == 10000 and abs(samples[-1]) < 10  # full volume, faded to silence
+    hold._cap(wav, 60)  # shorter than the cap: unchanged
+    with wave.open(str(wav)) as r:
+        assert r.getnframes() == 16000 * 5

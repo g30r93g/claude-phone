@@ -115,6 +115,40 @@ and put your API key in the keychain (`security add-generic-password -s claude-p
 that call falls back to the Mac voice rather than going silent. Each repo can have its own voice (`repo_voices`
 in [config.example.toml](config.example.toml)).
 
+### Conversations and hold music (optional)
+
+When Claude rings, it waits `pickup_pause` seconds (default 1.5) after you answer, then introduces itself:
+"Claude from project lemon stand working on ags 2", from the repo and branch. On main or master it leaves out
+the branch. Outside a git repo it says "Claude here".
+
+By default, dialling a session takes one message and hangs up. With `conversation = true` the line stays
+open: you hear hold music while Claude works, then its reply read out, then a beep for your next turn. Each
+turn reaches Claude with a note asking for a short spoken reply. Code, tables and anything past about 60 words
+stay on screen. Say nothing to end the call, or press # during the hold music to leave the reply on screen.
+
+### Hold music
+
+You hear hold music in conversation mode while Claude works, and when you dial a session that is busy on a
+task. To use your own tracks:
+
+1. Put audio files in `~/.claude-phone/hold/`. The folder is outside the repo, so tracks never reach git.
+2. Use mp3, m4a, aac, wav, aiff, caf or flac. For webm, opus or ogg, `brew install ffmpeg` first.
+3. Call. The next hold picks up new files, so there is no restart.
+
+Each call shuffles the tracks into a new order. On first use, each track converts to the phone's 16 kHz
+format in `~/.claude-phone/sounds/hold-tracks/`. The conversion removes silence at the start of the track. It
+also cuts a track at `hold_track_max` seconds (default 300) with a 3-second fade-out, and the next track then
+starts. Set `hold_track_max = 0` to play whole tracks. A file that does not convert is skipped. Other files in
+the folder, such as a credits file, are ignored.
+
+Use only music you have the right to play. Kevin MacLeod's tracks at [incompetech.com](https://incompetech.com)
+are free under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) if you credit him. "Local Forecast -
+Elevator" and "Fluffing a Duck" both suit a phone line. Keep the credit in a text file in the folder.
+
+With no tracks in the folder, hold music is a track made by ElevenLabs Music if you made one with
+`phone hold-music`. Else it is Greensleeves, which claude-phone plays from a melody in the code, so the repo
+holds no audio.
+
 ### Meetings and the screen (optional)
 
 With `screen_push = true`, every call and announcement also leaves a short summary on the phone's screen
@@ -166,6 +200,8 @@ tail -f ~/.claude-phone/logs/phone.log   # calls, transcripts, every injection
 | `~/.claude-phone/logs/asterisk/messages.log` | Asterisk log |
 | `~/.claude-phone/etc/asterisk/` | generated Asterisk config (from `asterisk/*.tmpl`, `phone config`) |
 | `~/.claude-phone/sounds/` | TTS cache |
+| `~/.claude-phone/hold/` | your hold music tracks (conversation mode and mid-task holds) |
+| `~/.claude-phone/replies/` | each session's last reply, saved by the Stop hook |
 
 ## Tests
 

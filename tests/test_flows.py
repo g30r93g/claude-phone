@@ -4,26 +4,33 @@ import asyncio
 
 import pytest
 
-from claude_phone import daemon, inject, push, registry, tts
+from claude_phone import daemon, hold, inject, push, registry, reply, tts
 
 
 class FakeCall:
-    def __init__(self, digits=(), recordings=()):
+    def __init__(self, digits=(), recordings=(), queued=()):
         self.id = "c1"
         self.up = True
         self.played = []
         self.digits = list(digits)  # what each interruptible play returns
         self.recordings = list(recordings)
+        self.queued = list(queued)  # keys already pressed, e.g. the # that ended a recording
 
     async def play(self, *media, interrupt="", until=None):
         self.played.extend(media)
+        if interrupt and self.queued:
+            return self.queued.pop(0)
+        if until is not None:  # let a watcher run, as a real playback would
+            await asyncio.sleep(0.01)
+            if until.done():
+                return "until"
         return self.digits.pop(0) if interrupt and self.digits else None
 
     async def record(self, name, max_seconds, terminate_on="#", max_silence=None):
         return self.recordings.pop(0) if self.recordings else ("finished", None)
 
     def drain_digits(self):
-        pass
+        self.queued.clear()
 
     async def hangup(self):
         self.up = False
@@ -239,3 +246,106 @@ def test_dnd_key_off_ends_a_meeting_hold_and_on_holds_calls(ctl, monkeypatch):
     assert ctl.hold_reason() == "do not disturb"
     ctl.set_phone_dnd(False)
     assert ctl.hold_reason() is None
+
+
+def test_conversation_reads_each_reply_and_takes_the_next_turn(ctl, monkeypatch):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.s.conversation = True
+    monkeypatch.setattr(daemon, "REPLY_POLL", 0.01)
+    monkeypatch.setattr(hold, "playlist", lambda: ["music"])
+
+    def type_and_reply(sess, text, source):  # Claude answers each message straight away
+        ctl.typed.append((sess.ext, text))
+        reply.save(sess.session_id, {"last_assistant_message": f"Answer {len(ctl.typed)}."})
+        return "sent"
+    monkeypatch.setattr(inject, "type_into", type_and_reply)
+    ctl.heard = ["Which colour?", "Make it blue.", ""]
+    call = FakeCall()
+    assert run(ctl.dial_session(call, 301)) == "Which colour?"
+    prefix = daemon.CONVERSATION_PREFIX.format(owner=ctl.s.owner)
+    assert ctl.typed == [(301, f"{prefix} Which colour?"), (301, f"{prefix} Make it blue.")]
+    assert "tts:Answer 1." in call.played and "tts:Answer 2." in call.played
+    assert call.played[-1] == "tts:" + tts.PHRASES["goodbye"]
+
+
+def test_conversation_hash_during_hold_leaves_the_reply_on_screen(ctl, monkeypatch):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.s.conversation = True
+    monkeypatch.setattr(daemon, "REPLY_POLL", 0.01)
+    monkeypatch.setattr(daemon, "KEY_GRACE", 0)  # a # pressed well into the hold
+    monkeypatch.setattr(hold, "playlist", lambda: ["music"])
+    ctl.heard = ["Run the full test suite."]
+    call = FakeCall(digits=["#"])
+    run(ctl.dial_session(call, 301))
+    assert call.played[-2:] == ["music", "tts:" + tts.PHRASES["conv_on_screen"]]
+
+
+def test_conversation_ignores_the_hash_that_ended_the_message(ctl, monkeypatch):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.s.conversation = True
+    monkeypatch.setattr(daemon, "REPLY_POLL", 0.01)
+    monkeypatch.setattr(hold, "playlist", lambda: ["music"])
+
+    def type_and_reply(sess, text, source):  # Claude takes a moment, so the hold music starts first
+        import threading
+        ctl.typed.append((sess.ext, text))
+        threading.Timer(0.1, reply.save, (sess.session_id, {"last_assistant_message": "Cloudy and mild."})).start()
+        return "sent"
+    monkeypatch.setattr(inject, "type_into", type_and_reply)
+    ctl.heard = ["What's the weather tomorrow?", ""]
+    call = FakeCall(recordings=[("digit", "#")], queued=["#"])
+    run(ctl.dial_session(call, 301))
+    assert "tts:Cloudy and mild." in call.played
+
+
+def _slow_reply(ctl, monkeypatch, answer):
+    """type_into that records the text and saves Claude's reply 0.1 s later."""
+    import threading
+
+    def type_and_reply(sess, text, source):
+        ctl.typed.append((sess.ext, text))
+        threading.Timer(0.1, reply.save, (sess.session_id, {"last_assistant_message": answer})).start()
+        return "sent"
+    monkeypatch.setattr(inject, "type_into", type_and_reply)
+
+
+def test_conversation_ignores_a_hash_at_the_very_start_of_the_hold(ctl, monkeypatch):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.s.conversation = True
+    monkeypatch.setattr(daemon, "REPLY_POLL", 0.01)
+    monkeypatch.setattr(hold, "playlist", lambda: ["music"])
+    _slow_reply(ctl, monkeypatch, "Cloudy and mild.")
+    ctl.heard = ["What's the weather tomorrow?", ""]
+    call = FakeCall(digits=["#"])  # the second copy of the recording's #, after the drain
+    run(ctl.dial_session(call, 301))
+    assert "tts:Cloudy and mild." in call.played
+
+
+def test_conversation_hold_music_starts_before_transcription_ends(ctl, monkeypatch):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.s.conversation = True
+    monkeypatch.setattr(daemon, "REPLY_POLL", 0.01)
+    monkeypatch.setattr(hold, "playlist", lambda: ["music"])
+    _slow_reply(ctl, monkeypatch, "Sure.")
+    call = FakeCall()
+    music_during = []
+
+    async def slow_transcribe(name):  # whisper takes a moment
+        await asyncio.sleep(0.05)
+        music_during.append("music" in call.played)
+        return "Hello." if len(music_during) == 1 else ""
+    monkeypatch.setattr(ctl, "transcribe", slow_transcribe)
+    run(ctl.dial_session(call, 301))
+    assert music_during[0] is True
+    assert call.played[-1] == "tts:" + tts.PHRASES["goodbye"]
+
+
+def test_hold_tracks_lose_their_leading_silence(tmp_path):
+    import array
+    import wave
+    from claude_phone import hold
+    wav = tmp_path / "t.wav"
+    tts._write_wav(wav, array.array("h", [0] * 8000 + [5000] * 16000).tobytes(), 16000)  # 0.5 s silence
+    hold._trim_start(wav)
+    with wave.open(str(wav)) as r:
+        assert r.getnframes() == 16000

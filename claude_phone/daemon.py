@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import config, diary, hold, housekeeping, inject, keychain, log, push, registry, screen, stt, tts
+from . import config, diary, hold, housekeeping, inject, keychain, log, push, registry, reply, screen, stt, tts
 from .ari import ARI, Call, Hangup
 
 lg = log.get("daemon")
@@ -26,6 +27,13 @@ ALLHANDS_PREFIX = "[All-hands message from {owner}, sent to every session]"
 # Claude Code's spinner line while a turn runs, e.g. "· Generating… (1m 51s · ↓ 4.3k tokens)".
 SPINNER = re.compile(r"…\s*\(\d+[hms]|esc to interrupt")
 HOLD_MAX = 600  # seconds on hold before the message is taken anyway
+REPLY_POLL = 1.0  # seconds between checks for Claude's reply in conversation mode
+# A # this soon after the hold music starts is the one that ended the recording: Linphone can send each
+# key twice, and the copy may arrive after the queue is drained.
+KEY_GRACE = 0.75
+# Typed before each spoken turn in conversation mode, so Claude answers for the ear.
+CONVERSATION_PREFIX = ("[Phone call: {owner} is listening. Reply in one to three short spoken sentences, "
+                       "no code, paths or lists.]")
 # Hangup causes that mean "didn't pick up": no answer, busy, DND (480/486/603), unreachable.
 NOT_ANSWERED = "not answered"
 # Missed-call reasons where a push would only repeat what the owner knows, or disturb a meeting.
@@ -318,6 +326,8 @@ class Controller:
         name = f"in-{ext}-{int(time.time())}"
         ended, d = await call.record(name, self.s.record_seconds)
         lg.info("dial-in %s recording ended: %s %s", ext, ended, d or "")
+        if self.s.conversation:
+            return await self.converse(call, ext, name, prefix, source)
         text = await self.transcribe(name)
         if text is None:
             if call.up:
@@ -333,6 +343,84 @@ class Controller:
         if call.up:
             await call.play(tts.phrase("sent" if result == "sent" else "inject_failed"))
         return text if result == "sent" else None
+
+    async def converse(self, call: Call, ext: int, name: str, prefix: str, source: str) -> str | None:
+        """Conversation mode, from the first recording on. Each turn: hold music starts at once while the
+        recording is transcribed and typed in, then Claude's reply is read out, then a beep and the next
+        recording. Ends when nothing is said, on hangup, or on # during the hold. Returns the first message
+        sent (None if nothing)."""
+        conv = CONVERSATION_PREFIX.format(owner=self.s.owner)
+        first, turn = None, 0
+        try:
+            while True:
+                stop = asyncio.get_running_loop().create_future()
+                music = asyncio.create_task(self.await_reply(call, ext, time.time(), stop))
+
+                async def end(phrase: str) -> str | None:
+                    if not stop.done():
+                        stop.set_result(None)
+                    with contextlib.suppress(Hangup):
+                        await music
+                    if call.up:
+                        await call.play(tts.phrase(phrase))
+                    return first
+
+                text = await self.transcribe(name)
+                if text is None:
+                    return await end("transcribe_failed")
+                if not text:
+                    return await end("goodbye" if turn else "nothing_heard")
+                sess = registry.by_ext(ext)
+                if not sess:
+                    return await end("vm_session_gone")
+                typed = " ".join(x for x in ("" if turn else prefix, conv, text) if x)
+                if await asyncio.to_thread(inject.type_into, sess, typed, source) != "sent":
+                    return await end("inject_failed")
+                first = first or text
+                answer = await music
+                if answer is None:
+                    if call.up:
+                        await call.play(tts.phrase("conv_on_screen"))
+                    return first
+                speech = await tts.render_async(reply.spoken(answer), sess.repo)
+                await call.play(speech, tts.beep())
+                turn += 1
+                name = f"in-{ext}-{int(time.time())}-{turn}"
+                ended, d = await call.record(name, self.s.record_seconds)
+                lg.info("conversation %s turn %d recording ended: %s %s", ext, turn, ended, d or "")
+        except Hangup:
+            return first  # anything said before the hangup is already typed in
+
+    async def await_reply(self, call: Call, ext: int, since: float, got: asyncio.Future | None = None) -> str | None:
+        """Hold music until the session on `ext` saves a reply newer than `since`. None: # pressed,
+        HOLD_MAX passed, the session ended, or the caller set `got` to None to stop the music."""
+        got = got or asyncio.get_running_loop().create_future()
+
+        async def watch() -> None:
+            while not got.done():
+                sess = registry.by_ext(ext)
+                r = reply.latest(sess.session_id) if sess else None
+                if not sess or (r and r[0] > since):
+                    got.set_result(r[1] if sess else None)
+                    return
+                await asyncio.sleep(REPLY_POLL)
+
+        watcher = asyncio.create_task(watch())
+        started = time.monotonic()
+        call.drain_digits()  # the # that ended the recording is queued too; it would skip the hold at once
+        try:
+            tracks = await asyncio.to_thread(hold.playlist)
+            i = 0
+            while not got.done() and time.monotonic() - started < HOLD_MAX:
+                if await call.play(tracks[i % len(tracks)], interrupt="#", until=got) == "#":
+                    if time.monotonic() - started < KEY_GRACE:
+                        continue  # the recording's own #: restart the same track
+                    return None
+                i += 1
+        finally:
+            watcher.cancel()
+        lg.info("conversation %s: waited %ds for a reply", ext, time.monotonic() - started)
+        return got.result() if got.done() else None
 
     async def mid_task(self, ext: int) -> bool:
         """The hooks say it's working and Claude Code's spinner is on screen. The hooks alone can stick on
@@ -367,9 +455,11 @@ class Controller:
         try:
             intro = await tts.op_async(tts.OPERATOR["hold"].format(label=tts.spoken_label(sess.label)))
             got = await call.play(intro, interrupt="#", until=free)
-            music, important = await asyncio.to_thread(hold.render), tts.op(tts.OPERATOR["important"])
+            tracks, important = await asyncio.to_thread(hold.playlist), tts.op(tts.OPERATOR["important"])
+            i = 0
             while got is None and time.monotonic() - started < HOLD_MAX:
-                got = await call.play(music, important, interrupt="#", until=free)
+                got = await call.play(tracks[i % len(tracks)], important, interrupt="#", until=free)
+                i += 1
         finally:
             watcher.cancel()
         lg.info("dial-in %s: off hold after %ds (%s)", sess.ext, time.monotonic() - started,
@@ -441,10 +531,9 @@ class Controller:
             repo, b, w = repo_info(body.get("cwd") or os.getcwd())
             branch = w or b
             label, ext, sid = (f"{repo}/{branch}" if branch else repo), None, body.get("session_id") or ""
-        # Spoken intro: just the repo, plus the branch only when it isn't the default one.
-        intro = tts.spoken_label(f"{repo}/{branch}" if branch and branch not in ("main", "master") else repo)
         if agent:
-            label, intro = f"{label}@{agent}", f"{intro}, {agent}"
+            label = f"{label}@{agent}"
+        intro = tts.caller_intro(repo, branch, agent)
         return {"label": label, "ext": ext, "sid": sid, "repo": repo, "intro": intro}
 
     async def ring(self, c: dict, prefix: str, auto_answer: bool = False) -> tuple[Call | None, str]:
@@ -467,6 +556,8 @@ class Controller:
                                      return_when=asyncio.FIRST_COMPLETED)
         if answered in done:
             lg.info("call answered for %s", c["label"])
+            if not auto_answer:  # time to lift the handset to an ear before the speech starts
+                await asyncio.sleep(self.s.pickup_pause)
             return call, ""
         self.ari.cancel_wait(answered)
         cause = call.gone.result().get("cause_txt") if call.gone in done else "timeout"

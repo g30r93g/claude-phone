@@ -173,6 +173,7 @@ PHRASES = {
     "inject_failed": "I couldn't reach that tab. Nothing was sent.",
     "busy": "The line's busy.",
     "goodbye": "That's all. Bye!",
+    "conv_on_screen": "I'll leave the rest on your screen. Bye!",
     "allhands_none": "There are no live sessions to talk to.",
     "allhands_intro": "All hands. Your message goes to {n} {sessions}.",
     "allhands_sent": "Sent to {n} {sessions}.",
@@ -188,6 +189,23 @@ def spoken_label(label: str) -> str:
     repo, _, branch = label.partition("/")
     clean = lambda x: " ".join(x.replace("-", " ").replace("_", " ").replace("/", " ").split())
     return f"{clean(repo)}, {clean(branch)}" if branch else clean(repo)
+
+
+# Branch prefixes that name the kind of change, not the change: "feat/ags-2" is spoken "ags 2".
+BRANCH_KINDS = {"feat", "feature", "fix", "bugfix", "hotfix", "chore", "refactor", "docs", "test", "release"}
+
+
+def caller_intro(repo: str, branch: str | None, agent: str | None = None) -> str:
+    """'Claude from project lemon stand working on ags 2' for an outbound call. The branch is left out on
+    main or master. No branch means the session isn't in a git repo: just 'Claude here'."""
+    who = f"Claude's {agent}" if agent else "Claude"
+    if not branch:
+        return f"{who} here"
+    intro = f"{who} from project {spoken_label(repo)}"
+    if branch not in ("main", "master"):
+        kind, _, rest = branch.partition("/")
+        intro += f" working on {spoken_label(rest if rest and kind.lower() in BRANCH_KINDS else branch).replace(',', '')}"
+    return intro
 
 
 OPERATOR = {
@@ -206,7 +224,7 @@ OPERATOR = {
 def prerender() -> int:
     from . import hold
     beep()
-    hold.render()
+    hold.playlist()
     n = 0
     for v in OPERATOR.values():
         if "{" not in v:

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import log, registry
+from . import log, registry, reply
 
 
 def _git(cwd: str, *args: str) -> str | None:
@@ -66,6 +66,7 @@ def run(event: str) -> int:
             registry.set_status(sid, "working")
         elif event == "stop":
             registry.set_status(sid, "idle")
+            reply.save(sid, payload)
     except Exception as e:  # never block Claude Code
         lg.warning("hook %s failed: %r", event, e)
     return 0

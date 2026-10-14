@@ -49,6 +49,11 @@ class Settings:
     whisper_port: int = 8910
     whisper_model: str = "ggml-large-v3-turbo-q5_0.bin"  # vs base.en on 23 real clips: same or better, 0.3 s each
     ring_seconds: int = 25
+    pickup_pause: float = 1.5  # seconds between answering and the first word, to get the handset to an ear
+    # Dialling a session keeps the line open: hold music while Claude works, then its reply read out, then
+    # your next turn. Off: one message per call.
+    conversation: bool = False
+    hold_track_max: int = 300  # seconds of a hold track before it fades out and the next one starts; 0: whole track
     record_seconds: int = 60
     callerid_max: int = 17  # T31P shows 17 chars before scrolling (tested 2026-10-09)
     tts_provider: str = "say"

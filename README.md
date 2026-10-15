@@ -42,7 +42,9 @@ are text to ElevenLabs, if you choose it, and missed-call pushes, if you set the
 | 600 | echo test |
 | 601 | 1 kHz tone |
 
-On any recording: `#` ends it, hanging up also ends it. In voicemail: `#` during a question skips it, `7` deletes it.
+On any recording: `#` ends it, hanging up also ends it. With `record_silence = 3` in config.toml, three
+seconds of silence ends it too, so `#` is optional. After the beep you have `record_grace` seconds (default 5)
+to start talking before silence can end it. In voicemail: `#` during a question skips it, `7` deletes it.
 
 ## Setup
 
@@ -119,12 +121,14 @@ in [config.example.toml](config.example.toml)).
 
 When Claude rings, it waits `pickup_pause` seconds (default 1.5) after you answer, then introduces itself:
 "Claude from project lemon stand working on ags 2", from the repo and branch. On main or master it leaves out
-the branch. Outside a git repo it says "Claude here".
+the branch. Outside a git repo it says "Claude here". Every call ends `hangup_pause` seconds (default 1) after
+the last word.
 
 By default, dialling a session takes one message and hangs up. With `conversation = true` the line stays
 open: you hear hold music while Claude works, then its reply read out, then a beep for your next turn. Each
-turn reaches Claude with a note asking for a short spoken reply. Code, tables and anything past about 60 words
-stay on screen. Say nothing to end the call, or press # during the hold music to leave the reply on screen.
+turn reaches Claude with a `[Phone call: ...]` note: you can't see a screen, so it must say the result in words.
+If a reply still has code or tables, or runs past about 60 words, the phone leaves that part out and offers
+more. Say nothing to end the call, or press # during the hold music to stop waiting.
 
 ### Hold music
 
@@ -148,6 +152,28 @@ Elevator" and "Fluffing a Duck" both suit a phone line. Keep the credit in a tex
 With no tracks in the folder, hold music is a track made by ElevenLabs Music if you made one with
 `phone hold-music`. Else it is Greensleeves, which claude-phone plays from a melody in the code, so the repo
 holds no audio.
+
+### Away from home (optional)
+
+The softphone extension (201) can reach claude-phone from anywhere over [Tailscale](https://tailscale.com), a
+private network between your own devices. No router port opens, so nobody on the internet can reach Asterisk.
+The desk phone stays on the LAN.
+
+1. Install Tailscale on the Mac (`brew install --cask tailscale`) and on the phone. Sign in to the same account
+   on both.
+2. On an iPhone, turn on VPN On Demand in the Tailscale app, so the tunnel stays up.
+3. Set `remote_ip = "tailscale"` in config.toml and run `phone restart asterisk`.
+4. In the softphone, set the SIP domain to the Mac's Tailscale address (`tailscale ip -4`). Use that address at
+   home too.
+
+Asterisk reads the Tailscale address when it starts. If Tailscale connects later, run `phone restart asterisk`.
+
+The Mac must stay awake. Run `phone install-services` so everything starts at login. In System Settings, set
+the Mac to not sleep automatically.
+
+iOS suspends a softphone in the background, and Linphone's push only works with Linphone's own servers. So
+when Claude calls and Linphone isn't open, the call goes to voicemail. Set up [missed-call pushes](#missed-call-pushes-ntfy)
+to hear about it, then dial 500 to answer. Calls you make work from anywhere: open Linphone and dial.
 
 ### Meetings and the screen (optional)
 

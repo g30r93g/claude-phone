@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any, Callable
 
@@ -152,6 +153,14 @@ class Call:
     def up(self) -> bool:
         return not self.gone.done()
 
+    async def _end_on_silence(self, name: str, started: asyncio.Future, stopped: asyncio.Future,
+                              grace: float) -> None:
+        """Stop the recording if no talking starts within `grace` seconds, else when the talking stops."""
+        done, _ = await asyncio.wait({started}, timeout=grace)
+        if done:
+            await stopped
+        await self.ari.post(f"/recordings/live/{name}/stop", ok404=True)
+
     def drain_digits(self) -> None:
         while not self.digits.empty():
             self.digits.get_nowait()
@@ -175,7 +184,11 @@ class Call:
     async def answer(self) -> None:
         await self._chan("POST", f"/channels/{self.id}/answer")
 
-    async def hangup(self) -> None:
+    async def hangup(self, pause: float = 0) -> None:
+        """End the call. `pause`: seconds of silence first, so the last word isn't cut off by the click.
+        The pause ends early if the caller hangs up."""
+        if pause and not self.gone.done():
+            await asyncio.wait({self.gone}, timeout=pause)
         if not self.gone.done():
             await self.ari.delete(f"/channels/{self.id}", ok404=True)
 
@@ -216,19 +229,40 @@ class Call:
                 raise Hangup()
 
     async def record(self, name: str, max_seconds: int, terminate_on: str = "#",
-                     max_silence: int | None = None) -> tuple[str, str | None]:
+                     max_silence: int | None = None, grace: float | None = None) -> tuple[str, str | None]:
         """Record to <spool>/recording/<name>.wav16. Returns (how_it_ended, digit):
-        'digit' (with the digit pressed), 'hangup', 'finished' (hangup or max length) or 'timeout'."""
+        'digit' (with the digit pressed), 'hangup', 'finished' (hangup, max length or silence) or 'timeout'.
+        `max_silence` alone: that much silence ends it, counting the silence before the first word.
+        With `grace` too: the caller has `grace` seconds to start talking, then `max_silence` seconds of
+        silence ends it. This uses Asterisk's TALK_DETECT."""
         self.drain_digits()
         finished = self.ari.wait_for(lambda e: e.get("type") in ("RecordingFinished", "RecordingFailed")
                                      and e.get("recording", {}).get("name") == name)
+        talk = bool(grace and max_silence)
+        if talk:
+            mine = lambda kind: lambda e: e.get("type") == kind and e.get("channel", {}).get("id") == self.id
+            started = self.ari.wait_for(mine("ChannelTalkingStarted"))
+            stopped = self.ari.wait_for(mine("ChannelTalkingFinished"))
         try:
+            if talk:
+                try:
+                    await self._chan("POST", f"/channels/{self.id}/variable", variable="TALK_DETECT(set)",
+                                     value=str(int(max_silence * 1000)))
+                except RuntimeError as e:  # no talk detection: plain max_silence, no grace
+                    self.ari.lg.warning("TALK_DETECT unavailable, recording without grace: %s", e)
+                    self.ari.cancel_wait(started)
+                    self.ari.cancel_wait(stopped)
+                    talk = False
             await self._chan("POST", f"/channels/{self.id}/record", name=name, format="wav16",
                              maxDurationSeconds=max_seconds, ifExists="overwrite", beep=False,
-                             terminateOn=terminate_on, maxSilenceSeconds=max_silence)
+                             terminateOn=terminate_on, maxSilenceSeconds=None if talk else max_silence)
         except Hangup:
             self.ari.cancel_wait(finished)
+            if talk:
+                self.ari.cancel_wait(started)
+                self.ari.cancel_wait(stopped)
             raise
+        watcher = asyncio.create_task(self._end_on_silence(name, started, stopped, grace)) if talk else None
         try:
             await self._race(finished, timeout=max_seconds + 5)
         except Hangup:
@@ -237,6 +271,13 @@ class Call:
         except asyncio.TimeoutError:
             await self.ari.post(f"/recordings/live/{name}/stop", ok404=True)
             return "timeout", None
+        finally:
+            if watcher:
+                watcher.cancel()
+                self.ari.cancel_wait(started)
+                self.ari.cancel_wait(stopped)
+                with contextlib.suppress(Hangup, RuntimeError):
+                    await self._chan("POST", f"/channels/{self.id}/variable", variable="TALK_DETECT(remove)", value="")
         digit = None if self.digits.empty() else self.digits.get_nowait()
         # Without a digit, the recording finished because the caller hung up or the time limit hit.
         return ("digit", digit) if digit else ("finished", None)

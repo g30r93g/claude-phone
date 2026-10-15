@@ -173,7 +173,7 @@ PHRASES = {
     "inject_failed": "I couldn't reach that tab. Nothing was sent.",
     "busy": "The line's busy.",
     "goodbye": "That's all. Bye!",
-    "conv_on_screen": "I'll leave the rest on your screen. Bye!",
+    "conv_stop_waiting": "Okay, I'll stop waiting. The answer will be in the session when you're back. Bye!",
     "allhands_none": "There are no live sessions to talk to.",
     "allhands_intro": "All hands. Your message goes to {n} {sessions}.",
     "allhands_sent": "Sent to {n} {sessions}.",

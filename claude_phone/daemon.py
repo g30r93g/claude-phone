@@ -32,8 +32,9 @@ REPLY_POLL = 1.0  # seconds between checks for Claude's reply in conversation mo
 # key twice, and the copy may arrive after the queue is drained.
 KEY_GRACE = 0.75
 # Typed before each spoken turn in conversation mode, so Claude answers for the ear.
-CONVERSATION_PREFIX = ("[Phone call: {owner} is listening. Reply in one to three short spoken sentences, "
-                       "no code, paths or lists.]")
+CONVERSATION_PREFIX = ("[Phone call: {owner} is on the phone and cannot see a screen. Your reply is read out. "
+                       "Say the result in words, in one to three short sentences. No code, paths, lists or links, "
+                       "and never refer to the screen.]")
 # Hangup causes that mean "didn't pick up": no answer, busy, DND (480/486/603), unreachable.
 NOT_ANSWERED = "not answered"
 # Missed-call reasons where a push would only repeat what the owner knows, or disturb a meeting.
@@ -273,7 +274,7 @@ class Controller:
             lg.exception("inbound call failed: %r", e)
         finally:
             try:
-                await call.hangup()
+                await call.hangup(self.s.hangup_pause)
             except Exception:
                 pass
             call.close()
@@ -324,7 +325,7 @@ class Controller:
         greeting = await tts.render_async(tts.PHRASES["connected"].format(label=tts.spoken_label(sess.label)), sess.repo)
         await call.play(greeting, tts.beep())
         name = f"in-{ext}-{int(time.time())}"
-        ended, d = await call.record(name, self.s.record_seconds)
+        ended, d = await call.record(name, self.s.record_seconds, max_silence=self.silence, grace=self.s.record_grace)
         lg.info("dial-in %s recording ended: %s %s", ext, ended, d or "")
         if self.s.conversation:
             return await self.converse(call, ext, name, prefix, source)
@@ -380,13 +381,13 @@ class Controller:
                 answer = await music
                 if answer is None:
                     if call.up:
-                        await call.play(tts.phrase("conv_on_screen"))
+                        await call.play(tts.phrase("conv_stop_waiting"))
                     return first
                 speech = await tts.render_async(reply.spoken(answer), sess.repo)
                 await call.play(speech, tts.beep())
                 turn += 1
                 name = f"in-{ext}-{int(time.time())}-{turn}"
-                ended, d = await call.record(name, self.s.record_seconds)
+                ended, d = await call.record(name, self.s.record_seconds, max_silence=self.silence, grace=self.s.record_grace)
                 lg.info("conversation %s turn %d recording ended: %s %s", ext, turn, ended, d or "")
         except Hangup:
             return first  # anything said before the hangup is already typed in
@@ -475,7 +476,7 @@ class Controller:
         intro = await tts.render_async(tts.PHRASES["allhands_intro"].format(n=n, sessions="session" if n == 1 else "sessions"))
         await call.play(intro, tts.beep())
         name = f"all-{int(time.time())}"
-        ended, d = await call.record(name, self.s.record_seconds)
+        ended, d = await call.record(name, self.s.record_seconds, max_silence=self.silence, grace=self.s.record_grace)
         lg.info("all-hands recording ended: %s %s", ended, d or "")
         text = await self.transcribe(name)
         if not text:
@@ -566,6 +567,11 @@ class Controller:
         lg.info("call to %s not answered: %s", self.s.ring_ext, cause)
         return None, f"{NOT_ANSWERED} ({cause})"
 
+    @property
+    def silence(self) -> int | None:
+        """Seconds of silence that end a recording, or None: only #, hangup or record_seconds end it."""
+        return self.s.record_silence or None
+
     @staticmethod
     def sentence(text: str | None) -> str:
         text = (text or "").strip()
@@ -611,11 +617,11 @@ class Controller:
             name = f"cj-{call.id}"
             try:
                 await call.play(await speech, tts.beep())
-                ended, digit = await call.record(name, self.s.record_seconds)
+                ended, digit = await call.record(name, self.s.record_seconds, max_silence=self.silence, grace=self.s.record_grace)
                 lg.info("call_owner recording ended: %s %s", ended, digit or "")
                 if call.up and ended == "digit":
                     await call.play(tts.phrase("vm_saved"))
-                await call.hangup()
+                await call.hangup(self.s.hangup_pause)
             except Hangup:
                 lg.info("%s hung up during the question", self.s.owner)
                 return await to_voicemail("hung up before answering")
@@ -656,7 +662,7 @@ class Controller:
                 return missed(why)
             try:
                 await call.play(await speech, tts.phrase("goodbye"))
-                await call.hangup()
+                await call.hangup(self.s.hangup_pause)
             except Hangup:
                 lg.info("%s hung up during the notification", self.s.owner)
                 return {"status": "delivered", "note": f"{self.s.owner} hung up before the end"}
@@ -681,7 +687,7 @@ class Controller:
                 return why
             try:
                 await call.play(await speech)
-                await call.hangup()
+                await call.hangup(self.s.hangup_pause)
             except Hangup:
                 pass
             finally:
@@ -729,7 +735,7 @@ class Controller:
             except Hangup:
                 return missed(f"{self.s.owner} hung up before the transfer completed")
             finally:
-                await call.hangup()
+                await call.hangup(self.s.hangup_pause)
                 call.close()
         if not said:
             return {"status": "connected_no_message", "to": target.label,
@@ -764,7 +770,7 @@ class Controller:
                 continue
             name = f"vm-{vm.id}-{int(time.time())}"
             try:
-                ended, d = await call.record(name, self.s.record_seconds, terminate_on="any")
+                ended, d = await call.record(name, self.s.record_seconds, terminate_on="any", max_silence=self.silence, grace=self.s.record_grace)
             except Hangup:
                 ended, d = "hangup", None
             lg.info("voicemail %s recording ended: %s %s", vm.id, ended, d or "")

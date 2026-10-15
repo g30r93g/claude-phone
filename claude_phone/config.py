@@ -33,6 +33,9 @@ class Settings:
     # Empty: this Mac's address on its default route, and that /24. Pin both once the Mac has a DHCP reservation.
     lan_ip: str = ""
     lan_cidr: str = ""
+    # Reach the softphone from outside the LAN over Tailscale. "": LAN only. "tailscale": this Mac's
+    # Tailscale address. Or an explicit address.
+    remote_ip: str = ""
     desk_ext: str = "200"
     softphone_ext: str = "201"
     # Which endpoint call_<owner> rings. Switch to softphone_ext while testing on Linphone.
@@ -50,11 +53,16 @@ class Settings:
     whisper_model: str = "ggml-large-v3-turbo-q5_0.bin"  # vs base.en on 23 real clips: same or better, 0.3 s each
     ring_seconds: int = 25
     pickup_pause: float = 1.5  # seconds between answering and the first word, to get the handset to an ear
+    hangup_pause: float = 1.0  # seconds between the last word and the hangup, so the call doesn't end abruptly
     # Dialling a session keeps the line open: hold music while Claude works, then its reply read out, then
     # your next turn. Off: one message per call.
     conversation: bool = False
     hold_track_max: int = 300  # seconds of a hold track before it fades out and the next one starts; 0: whole track
     record_seconds: int = 60
+    # Seconds of silence that end a recording, as # does. 0: only #, hangup or record_seconds end it.
+    record_silence: int = 0
+    # With record_silence: seconds to start talking after the beep before silence can end the recording.
+    record_grace: int = 5
     callerid_max: int = 17  # T31P shows 17 chars before scrolling (tested 2026-10-09)
     tts_provider: str = "say"
     say_voice: str = "Daniel"
@@ -139,6 +147,21 @@ def detect_lan_ip() -> str | None:
         return ip or None
     except (StopIteration, OSError, subprocess.SubprocessError):
         return None
+
+
+TAILSCALE_CIDR = "100.64.0.0/10"
+
+
+def remote_address(s: Settings) -> str | None:
+    """The address the softphone reaches Asterisk on from outside the LAN, or None when remote_ip is off
+    or Tailscale isn't connected."""
+    import ipaddress
+    if not s.remote_ip:
+        return None
+    if s.remote_ip != "tailscale":
+        return s.remote_ip if s.remote_ip in current_lan_ips() else None
+    net = ipaddress.ip_network(TAILSCALE_CIDR)
+    return next((ip for ip in sorted(current_lan_ips()) if ipaddress.ip_address(ip) in net), None)
 
 
 def current_lan_ips() -> set[str]:

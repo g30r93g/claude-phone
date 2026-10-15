@@ -12,7 +12,7 @@ from . import config
 
 DIR = config.HOME / "replies"
 MAX_WORDS = 60
-ON_SCREEN = "The rest is on your screen."
+MORE = "There's more if you ask."  # the caller can't see a screen, so a cut reply offers the rest
 
 
 def _path(session_id: str) -> Path:
@@ -71,7 +71,7 @@ def from_transcript(path: str | None, tail_bytes: int = 2_000_000) -> str | None
 
 def spoken(text: str, max_words: int = MAX_WORDS) -> str:
     """Markdown written for a screen, cut down to a few sentences for the phone. Code, tables and anything
-    past max_words stay on screen."""
+    past max_words are left out, and the reply offers to say more."""
     cut = False
     text, n = re.subn(r"```.*?(```|$)", " ", text, flags=re.S)
     cut |= n > 0
@@ -101,5 +101,5 @@ def spoken(text: str, max_words: int = MAX_WORDS) -> str:
         if len(text.split()) > max_words:  # one long sentence
             text = " ".join(text.split()[:max_words]) + "."
     if not text:
-        return "Done. " + ON_SCREEN
-    return f"{text} {ON_SCREEN}" if cut else text
+        return "Done. " + MORE
+    return f"{text} {MORE}" if cut else text

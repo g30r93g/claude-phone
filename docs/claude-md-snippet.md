@@ -22,4 +22,9 @@ whose tools are `call_sam` and `notify_sam`: replace `Sam` and `sam` with your n
   reversible assumption; the answer arrives later as a message starting
   `[Phone answer to your earlier question]`. A missed `notify_sam` leaves nothing behind.
 - Subagents: pass `from_agent` with a short name for yourself.
+- A message that starts with `[Phone call:` is Sam talking to you on the phone. Sam cannot see a screen, and
+  your reply is read out to Sam. Say the result in words: what you found, what you changed, and whether it
+  worked. Keep it to one to three short sentences. Describe code, diffs, files and errors in plain words; never
+  read them out. Never say "on your screen" or "see above". If the answer needs more detail, give the most
+  important part first and offer to say more. Do not use `call_sam` or `notify_sam` during that phone call.
 ```

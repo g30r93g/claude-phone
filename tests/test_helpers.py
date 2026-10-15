@@ -103,16 +103,16 @@ def test_siri_falls_back_to_say(monkeypatch):
 
 def test_spoken_reply_drops_code_and_markdown():
     text = "**Done.** See [the PR](https://x.y/1).\n\n```py\nprint(1)\n```\n- tests pass"
-    assert reply.spoken(text) == f"Done. See the PR. tests pass {reply.ON_SCREEN}"
+    assert reply.spoken(text) == f"Done. See the PR. tests pass {reply.MORE}"
     assert reply.spoken("All good.") == "All good."
     assert reply.spoken("Use `call_owner`, it's _fine_.") == "Use call owner, it's fine ."
-    assert reply.spoken("```\ncode\n```") == f"Done. {reply.ON_SCREEN}"
+    assert reply.spoken("```\ncode\n```") == f"Done. {reply.MORE}"
 
 
 def test_spoken_reply_keeps_whole_sentences_under_the_limit():
     text = " ".join(f"Sentence number {i} is here." for i in range(30))
     out = reply.spoken(text, max_words=12)
-    assert out == f"Sentence number 0 is here. Sentence number 1 is here. {reply.ON_SCREEN}"
+    assert out == f"Sentence number 0 is here. Sentence number 1 is here. {reply.MORE}"
 
 
 def test_reply_from_transcript_is_the_text_after_the_last_tool_call(tmp_path):
@@ -145,3 +145,82 @@ def test_long_hold_tracks_are_cut_with_a_fade(tmp_path):
     hold._cap(wav, 60)  # shorter than the cap: unchanged
     with wave.open(str(wav)) as r:
         assert r.getnframes() == 16000 * 5
+
+
+def test_hangup_pause_waits_unless_the_caller_hangs_up_first():
+    import asyncio
+    import time
+    from claude_phone.ari import Call
+
+    class FakeARI:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, path, ok404=False):
+            self.deleted.append(path)
+
+    async def scenario(caller_hangs_up_after):
+        call = Call.__new__(Call)
+        call.id, call.ari = "c1", FakeARI()
+        call.gone = asyncio.get_running_loop().create_future()
+        if caller_hangs_up_after is not None:
+            asyncio.get_running_loop().call_later(caller_hangs_up_after, call.gone.set_result, {})
+        t = time.monotonic()
+        await call.hangup(pause=0.3)
+        return time.monotonic() - t, call.ari.deleted
+
+    waited, deleted = asyncio.run(scenario(None))
+    assert waited >= 0.3 and deleted == ["/channels/c1"]
+    waited, deleted = asyncio.run(scenario(0.05))  # gone before the pause ends: no wait, no delete
+    assert waited < 0.2 and deleted == []
+
+
+def test_remote_ip_adds_a_tailscale_transport_for_the_softphone(monkeypatch):
+    from claude_phone import cli, config, keychain
+    monkeypatch.setattr(keychain, "get_or_create", lambda name: "secret")
+    monkeypatch.setattr(config, "current_lan_ips", lambda: {"192.168.0.61", "100.101.102.103"})
+    monkeypatch.setattr(config, "load", lambda: Settings(lan_ip="192.168.0.61", lan_cidr="192.168.0.0/24"))
+    cli.render_asterisk_config()
+    pjsip = (config.ASTERISK_ETC / "pjsip.conf").read_text()
+    assert "[remote]" not in pjsip and "100.64.0.0/10" not in pjsip  # off by default
+
+    monkeypatch.setattr(config, "load", lambda: Settings(lan_ip="192.168.0.61", lan_cidr="192.168.0.0/24",
+                                                          remote_ip="tailscale"))
+    cli.render_asterisk_config()
+    pjsip = (config.ASTERISK_ETC / "pjsip.conf").read_text()
+    assert "[remote]\ntype=transport\nprotocol=udp\nbind=100.101.102.103:5060" in pjsip
+    assert "permit=100.64.0.0/10" in pjsip
+    soft = pjsip.split("[201](desk-endpoint)")[1].split("[201-auth]")[0]
+    assert "transport=remote" in soft and "media_address=100.101.102.103" in soft
+    desk = pjsip.split("[200](desk-endpoint)")[1].split("[200-auth]")[0]
+    assert "transport=remote" not in desk  # the desk phone stays on the LAN
+
+
+def test_end_on_silence_waits_for_talking_then_for_it_to_stop():
+    import asyncio
+    from claude_phone.ari import Call
+
+    class FakeARI:
+        def __init__(self):
+            self.posts = []
+
+        async def post(self, path, **kw):
+            self.posts.append((round(asyncio.get_running_loop().time() - t0, 1), path))
+
+    async def scenario(talk_at, stop_at):
+        global t0
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        call = Call.__new__(Call)
+        call.id, call.ari = "c1", FakeARI()
+        started, stopped = loop.create_future(), loop.create_future()
+        if talk_at is not None:
+            loop.call_later(talk_at, started.set_result, {})
+            loop.call_later(stop_at, stopped.set_result, {})
+        await call._end_on_silence("r1", started, stopped, grace=0.3)
+        return call.ari.posts
+
+    # Nobody talks: stop when the grace ends.
+    assert asyncio.run(scenario(None, None)) == [(0.3, "/recordings/live/r1/stop")]
+    # Talking starts inside the grace and stops later: stop then, not at the end of the grace.
+    assert asyncio.run(scenario(0.1, 0.6)) == [(0.6, "/recordings/live/r1/stop")]

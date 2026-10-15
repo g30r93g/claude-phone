@@ -24,11 +24,18 @@ MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}"
 
 def render_asterisk_config() -> None:
     s = config.load()
+    remote = config.remote_address(s)
+    if s.remote_ip and not remote:
+        print(f"remote_ip = {s.remote_ip!r}, but this Mac has no such address (is Tailscale connected?). "
+              "The softphone is LAN only until `phone restart asterisk` after it connects.")
     subs = {
         "ETC": str(config.ASTERISK_ETC), "PREFIX": str(config.ASTERISK_PREFIX), "HOME": str(config.HOME),
         "RUN": str(config.ASTERISK_RUN), "ARI_PORT": str(s.ari_port), "LAN_IP": s.lan_ip,
         "LAN_CIDR": s.lan_cidr, "DESK_EXT": s.desk_ext, "SOFT_EXT": s.softphone_ext,
         "SIP_PASSWORD": keychain.get_or_create("sip"), "ARI_PASSWORD": keychain.get_or_create("ari"),
+        "REMOTE_TRANSPORT": f"\n[remote]\ntype=transport\nprotocol=udp\nbind={remote}:5060" if remote else "",
+        "REMOTE_PERMIT": f"permit={config.TAILSCALE_CIDR}" if remote else "",
+        "SOFT_REMOTE": f"transport=remote\nmedia_address={remote}" if remote else "",
     }
     config.ASTERISK_ETC.mkdir(parents=True, exist_ok=True)
     (config.HOME / "logs" / "asterisk").mkdir(parents=True, exist_ok=True)

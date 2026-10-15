@@ -7,11 +7,13 @@ user_agent=claude-phone
 type=transport
 protocol=udp
 bind=@@LAN_IP@@:5060
+@@REMOTE_TRANSPORT@@
 
 [acl]
 type=acl
 deny=0.0.0.0/0
 permit=@@LAN_CIDR@@
+@@REMOTE_PERMIT@@
 
 [desk-endpoint](!)
 type=endpoint
@@ -44,10 +46,11 @@ username=@@DESK_EXT@@
 password=@@SIP_PASSWORD@@
 [@@DESK_EXT@@](desk-aor)
 
-; Linphone (testing)
+; Linphone (testing). With remote_ip set, it registers over Tailscale from anywhere, home included.
 [@@SOFT_EXT@@](desk-endpoint)
 auth=@@SOFT_EXT@@-auth
 aors=@@SOFT_EXT@@
+@@SOFT_REMOTE@@
 [@@SOFT_EXT@@-auth]
 type=auth
 auth_type=userpass

@@ -15,6 +15,8 @@ class FakeCall:
         self.digits = list(digits)  # what each interruptible play returns
         self.recordings = list(recordings)
         self.queued = list(queued)  # keys already pressed, e.g. the # that ended a recording
+        self.silences = []  # max_silence of each recording
+        self.graces = []  # grace of each recording
 
     async def play(self, *media, interrupt="", until=None):
         self.played.extend(media)
@@ -26,13 +28,15 @@ class FakeCall:
                 return "until"
         return self.digits.pop(0) if interrupt and self.digits else None
 
-    async def record(self, name, max_seconds, terminate_on="#", max_silence=None):
+    async def record(self, name, max_seconds, terminate_on="#", max_silence=None, grace=None):
+        self.silences.append(max_silence)
+        self.graces.append(grace)
         return self.recordings.pop(0) if self.recordings else ("finished", None)
 
     def drain_digits(self):
         self.queued.clear()
 
-    async def hangup(self):
+    async def hangup(self, pause=0):
         self.up = False
 
     def close(self):
@@ -277,7 +281,7 @@ def test_conversation_hash_during_hold_leaves_the_reply_on_screen(ctl, monkeypat
     ctl.heard = ["Run the full test suite."]
     call = FakeCall(digits=["#"])
     run(ctl.dial_session(call, 301))
-    assert call.played[-2:] == ["music", "tts:" + tts.PHRASES["conv_on_screen"]]
+    assert call.played[-2:] == ["music", "tts:" + tts.PHRASES["conv_stop_waiting"]]
 
 
 def test_conversation_ignores_the_hash_that_ended_the_message(ctl, monkeypatch):
@@ -349,3 +353,16 @@ def test_hold_tracks_lose_their_leading_silence(tmp_path):
     hold._trim_start(wav)
     with wave.open(str(wav)) as r:
         assert r.getnframes() == 16000
+
+
+def test_record_silence_ends_recordings_when_set(ctl):
+    registry.register("s", "site-be-v2", "main", None, "/r", "tab")
+    ctl.heard = ["Hello."]
+    call = FakeCall()
+    run(ctl.dial_session(call, 301))
+    assert call.silences == [None]  # off by default: only # or hangup
+    ctl.s.record_silence = 3
+    ctl.heard = ["Hello."]
+    call = FakeCall()
+    run(ctl.dial_session(call, 301))
+    assert call.silences == [3] and call.graces == [ctl.s.record_grace]
